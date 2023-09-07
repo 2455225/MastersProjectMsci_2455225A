@@ -1,8 +1,9 @@
 ---
-title: "Stephen Addison Masters"
-author: "Stephen Addison"
+title: "Analysis of The Cancer Genome Atlas Lung Adenocarcinoma (LUAD) Samples Identifies Ecto-5’-nucleotidase (NT5E) as a Potential Driver of LUAD Tumorigenesis"
+author: "2455225A"
 date: "2023-08-17"
 output: ioslides_presentation
+#Created on R-Markdown and Transferred to Github
 --- Installing Relevant Packages from Bioconductor- https://www.bioconductor.org/ and Preproccessing TCGA Data using the TCGAbiolinks Package
 
 ```{r setup, include=FALSE}
