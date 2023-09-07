@@ -1,0 +1,1327 @@
+---
+title: "Stephen Addison Masters"
+author: "Stephen Addison"
+date: "2023-08-17"
+output: ioslides_presentation
+--- Installing Relevant Packages from Bioconductor- https://www.bioconductor.org/ and Preproccessing TCGA Data using the TCGAbiolinks Package
+
+```{r setup, include=FALSE}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager") +
+  remove.packages("TCGAbiolinks")
+BiocManager::install("TCGAbiolinks")
+BiocManager::install("S4Arrays")
+BiocManager::install("DelayedArray")
+BiocManager::install("Biostrings")
+library("TCGAbiolinks")
+library("limma")
+library("edgeR")
+library("glmnet")
+library("factoextra")
+library("FactoMineR")
+library("caret")
+library("SummarizedExperiment")
+library("gplots")
+library("survival")
+library("survminer")
+library("RColorBrewer")
+library("gProfileR")
+library("genefilter")
+library("TCGAretriever")
+library("limma")
+
+```
+--- Selecting the RNA-seq data for Lung adenocarcinoma data in the TCGA 
+
+```{r}
+GDCprojects = getGDCprojects()
+head(GDCprojects[c("project_id", "name")])
+TCGAbiolinks:::getProjectSummary("TCGA-LUAD")
+query_TCGA = GDCquery(
+  project = "TCGA-LUAD",
+  data.category = "Transcriptome Profiling", # parameter enforced by GDCquery
+  experimental.strategy = "RNA-Seq",
+  workflow.type = "STAR - Counts")
+luad_res= getResults(query_TCGA)
+colnames(luad_res)
+head(luad_res$sample_type)
+summary(factor(luad_res$sample_type))
+
+query_TCGA = GDCquery(
+  project = "TCGA-LUAD",
+  data.category = "Transcriptome Profiling", # parameter enforced by GDCquery
+  experimental.strategy = "RNA-Seq",
+  workflow.type = "STAR - Counts",
+  sample.type = c("Primary Tumor",'Solid Tissue Normal'),data.type = 'Gene Expression Quantification')
+
+
+GDCdownload(query=query_TCGA)
+```
+--- Tables for TCGA-LUAD data
+```{r}
+table(tcga_data@colData$vital_status)
+table(tcga_data@colData$tumor_stage)
+table(tcga_data@colData$definition)
+table(tcga_data@colData$tissue_or_organ_of_origin)
+table(tcga_data@colData$gender)
+table(tcga_data@colData$race)
+```
+---Saving tcga data
+```{r}
+saveRDS(object = tcga_data,
+        file = "tcga_data.RDS",
+        compress = FALSE)
+tcga_data = readRDS(file = "tcga_data.RDS")
+```
+
+--- Using Limma code- adapdted from https://www.costalab.org/wp-content/uploads/2020/11/R_class_D3.html 
+Changed to fit study
+```{r}
+limma_pipeline = function(
+    tcga_data,
+    condition_variable,
+    reference_group=NULL){
+  
+  design_factor = colData(tcga_data)[, condition_variable, drop=T]
+  
+  group = factor(design_factor)
+  if(!is.null(reference_group)){group = relevel(group, ref=reference_group)}
+  
+  design = model.matrix(~ group)
+  
+  dge = DGEList(counts=assay(tcga_data),
+                samples=colData(tcga_data),
+                genes=as.data.frame(rowData(tcga_data)))
+  
+  # filtering
+  keep = filterByExpr(dge,design)
+  dge = dge[keep,,keep.lib.sizes=FALSE]
+  rm(keep)
+  
+  # Normalization (TMM followed by voom)
+  dge = calcNormFactors(dge)
+  v = voom(dge, design, plot=TRUE)
+  
+  # Fit model to data given design
+  fit = lmFit(v, design)
+  fit = eBayes(fit)
+  
+  # Show top genes
+  topGenes = topTable(fit, coef=ncol(design), number=100, sort.by="p")
+  
+  return(
+    list(
+      voomObj=v, # normalized data
+      fit=fit, # fitted model and statistics
+      topGenes=topGenes # the 100 most differentially expressed genes
+    )
+  )
+}
+```
+--- Using condition variables 'definition' for healthy or LUAD samples, also using AJCC Pathologic states
+```{r}
+limma_res = limma_pipeline(
+  tcga_data=tcga_data,
+  condition_variable="definition",
+  reference_group="Solid Tissue Normal"
+)
+saveRDS(object = limma_res,
+        file = "limma_.RDS",
+        compress = FALSE)
+
+
+
+limma_res_stage= limma_pipeline(
+  tcga_data=tcga_data,
+  condition_variable="ajcc_pathologic_stage",
+  reference_group="Stage I"
+)
+```
+
+## R Markdown
+
+This is an R Markdown presentation. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document.
+
+
+--- Plotting PCA definition
+
+```{r pressure}
+ plot_PCA_definition = function(voomObj, condition_variable){
+    group = factor(voomObj$targets[, condition_variable])
+    pca = prcomp(t(voomObj$E))
+    # Take PC1 and PC2 for the plot
+    plot(pca$x[,1:2],col=group, pch=19,main = "PCA of Normal Tissue and Tumour Lung Samples", xlab = "PC1", ylab = "PC2")
+ 
+    # include a legend for points
+    legend("bottomleft", inset=.01, levels(group), pch=19, col=1:length(levels(group)))
+    return(pca)
+  }
+  definition_res_pca = plot_PCA_definition(limma_res$voomObj, "definition")
+```
+
+--- Removing suffixes from AJCC states so there are Stage I,II etc rather than IA, IIB etc
+
+```{r pressure}
+ #removing prefixes of the stages ie stage IA, will become Stage I and so on
+  ajcc_res_pca = function(voomObj, condition_variable) {
+    group = factor(voomObj$targets[, condition_variable])
+    
+    # Combine "Stage IA" and "Stage IB" into "Stage I" in the factor variable
+    group_stages <- group
+    group_stages[group_stages %in% c("Stage IA", "Stage IB")] <- "Stage I"
+    
+    # Combine "Stage IIA" and "Stage IIB" into "Stage II" in the factor variable
+    group_stages[group_stages %in% c("Stage IIA", "Stage IIB")] <- "Stage II"
+    
+    # Combine "Stage IIIA" and "Stage IIIB" into "Stage III" in the factor variable
+    group_stages[group_stages %in% c("Stage IIIA", "Stage IIIB")] <- "Stage III"
+    
+    # Combine "Stage IV" into "Stage IV" in the factor variable
+    group_stages[group_stages %in% c("Stage IV")] <- "Stage IV"
+    
+    # Update the levels of the factor variable
+    group_stages <- factor(group_stages, levels = c("Stage I", "Stage II", "Stage III", "Stage IV"))
+    
+    pca = prcomp(t(voomObj$E))
+    
+    # Take PC1 and PC2 for the plot
+    plot(pca$x[,1], pca$x[,2], col = group_stages, pch = 19, main = "PCA of AJCC Pathologic Stages", xlab = "PC1", ylab = "PC2")
+    
+    # Include a legend for points
+    legend("bottomleft", inset = 0.01, levels(group_stages), pch = 19, col = 1:length(levels(group_stages)))  
+    return(pca)
+  }
+  
+  res_pcastages = plot_PCA(limma_res$voomObj, "ajcc_pathologic_stage")
+  
+  res_pca
+  library(cowplot)
+  combined_plot_PCA <- plot_grid(res_pca,res_pcastages)
+  
+  
+  save_plot("combined_plotenrichr.tiff", combined_plotenrichr, base_width = 25, base_height = 15, dpi = 300)
+ 
+```
+--- Transpose and Save Limma_res
+```{r}
+
+  d_mat = as.matrix(t(limma_res$voomObj$E))
+
+  d_resp = as.factor(limma_res$voomObj$targets$definition)
+ saveRDS(object = limma_res,
+        file = "limma_res.RDS",
+        compress = FALSE) 
+```
+--- Correlation Plots/ Survival PLots and gene expression beeswarm
+```{r}
+saveRDS(object = limma_res,
+        file = "limma_res.RDS",
+        compress = FALSE)
+tcga_data = readRDS(file = "tcga_data.RDS")
+limma_res = readRDS(file = "limma_res.RDS")
+```
+
+--- Creating a Survival Variable
+```{r}
+clinical = tcga_data@colData
+d_mat = t(limma_res$voomObj$E)
+expr_df = limma_res$voomObj$genes
+# Select only Primary Tumour
+
+clin_df = clinical[clinical$definition == "Primary solid Tumor",
+                   c("patient",
+                     "vital_status",
+                     "days_to_death",
+                     "days_to_last_follow_up",
+                     "gender",
+                     "ajcc_pathologic_stage")]
+clin_df$deceased = clin_df$vital_status == "Dead"
+clin_df$overall_survival = ifelse(clin_df$deceased,
+                                 clin_df$days_to_death,
+                                 clin_df$days_to_last_follow_up)
+Surv(clin_df$overall_survival, clin_df$deceased)
+```
+--- Creating Expression objects for individual genes of interest
+```{r}
+#NT5E-----------------------------------------------------  
+
+dim(expr_df)
+NT5E_id = expr_df['ENSG00000135318.12', "gene_id"]
+
+
+NT5E_name = expr_df['ENSG00000135318.12', "gene_name"]
+
+NT5Eexpr_diseased = d_mat[rownames(clin_df), NT5E_id]
+NT5Eexpr_healthy = d_mat[setdiff(rownames(d_mat), rownames(clin_df)), NT5E_id]
+
+
+#KRAS-----------------------------------------------------
+
+KRAS_id =expr_df['ENSG00000133703.13', "gene_id"]
+# also get the common gene name of the first row
+KRAS_name =expr_df['ENSG00000133703.13', "gene_name"]
+
+KRASexpr_diseased = d_mat[rownames(clin_df), KRAS_id]
+KRASexpr_healthy = d_mat[setdiff(rownames(d_mat), rownames(clin_df)), KRAS_id]
+
+
+# EGFR-----------------------------------------------------------------------------
+EGFR_id =expr_df['ENSG00000146648.19', "gene_id"]
+# also get the common gene name of the first row
+EGFR_name =expr_df['ENSG00000146648.19', "gene_name"]
+
+EGFRexpr_diseased = d_mat[rownames(clin_df), EGFR_id]
+EGFRexpr_healthy = d_mat[setdiff(rownames(d_mat), rownames(clin_df)), EGFR_id]
+
+#EREGE------------------------------------------------------------------------------------
+EREG_id =expr_df['ENSG00000124882.4', "gene_id"]
+# also get the common gene name of the first row
+EREG_name =expr_df['ENSG00000124882.4', "gene_name"]
+
+EREGexpr_diseased = d_mat[rownames(clin_df), EREG_id]
+EREGexpr_healthy = d_mat[setdiff(rownames(d_mat), rownames(clin_df)), EREG_id]
+
+
+#AREG---------------------------------------------------------------------------
+AREG_id =expr_df['ENSG00000109321.11', "gene_id"]
+# also get the common gene name of the first row
+AREG_name =expr_df['ENSG00000109321.11', "gene_name"]
+
+AREGexpr_diseased = d_mat[rownames(clin_df), AREG_id]
+AREGexpr_healthy = d_mat[setdiff(rownames(d_mat), rownames(clin_df)), AREG_id]
+#cd39-----------------------------------------------------------------------------
+cd39_id =expr_df['ENSG00000138185.20', "gene_id"]
+# also get the common gene name of the first row
+cd39_name =expr_df['ENSG00000138185.20', "gene_name"]
+
+cd39expr_diseased = d_mat[rownames(clin_df), cd39_id]
+cd39expr_healthy = d_mat[setdiff(rownames(d_mat), rownames(clin_df)), cd39_id]
+
+#A2a/A2b------------------------------------------------------------------------------------------
+A2a_id =expr_df['ENSG00000128271.22', "gene_id"]
+# also get the common gene name of the first row
+A2a_name =expr_df['ENSG00000128271.22', "gene_name"]
+A2aexpr_diseased = d_mat[rownames(clin_df), A2a_id]
+A2aexpr_healthy = d_mat[setdiff(rownames(d_mat), rownames(clin_df)), A2a_id]
+
+#A2b--------------------------------------------------------------------------------------
+A2b_id =expr_df['ENSG00000170425.3', "gene_id"]
+# also get the common gene name of the first row
+A2b_name =expr_df['ENSG00000170425.3', "gene_name"]
+A2bexpr_diseased = d_mat[rownames(clin_df), A2b_id]
+A2bexpr_healthy = d_mat[setdiff(rownames(d_mat), rownames(clin_df)), A2b_id]
+
+
+
+
+
+#HIPK1-----------------------------------------------------------------------------
+
+HIPK1_id =expr_df['ENSG00000163349.22', "gene_id"]
+# also get the common gene name of the first row
+HIPK1_name =expr_df['ENSG00000163349.22', "gene_name"]
+
+HIPK1expr_diseased = d_mat[rownames(clin_df), HIPK1_id]
+HIPK1expr_healthy = d_mat[setdiff(rownames(d_mat), rownames(clin_df)), HIPK1_id]
+
+
+#MAPK1 -------------------------------------------------------------------------------------------------------------
+
+MAPK1_id = expr_df['ENSG00000100030.15', "gene_id"]
+# also get the common gene name of the first row
+MAPK1_name =expr_df['ENSG00000100030.15', "gene_name"]
+
+MAPK1expr_diseased = d_mat[rownames(clin_df),MAPK1_id]
+MAPK1expr_healthy = d_mat[setdiff(rownames(d_mat), rownames(clin_df)), MAPK1_id]
+
+#ERBB GENES
+ERBB2_id =expr_df['ENSG00000141736.14', "gene_id"]
+# also get the common gene name of the first row
+ERBB2_name =expr_df['ENSG00000141736.14', "gene_name"]
+
+ERBB2expr_diseased = d_mat[rownames(clin_df),ERBB2_id]
+ERBB2expr_healthy = d_mat[setdiff(rownames(d_mat), rownames(clin_df)), ERBB2_id]
+#ERBB4
+ERBB3_id =expr_df['ENSG00000065361.16', "gene_id"]
+
+ERBB3_name =expr_df['ENSG00000065361.16', "gene_name"]
+
+ERBB3expr_diseased = d_mat[rownames(clin_df),ERBB3_id]
+ERBB3expr_healthy = d_mat[setdiff(rownames(d_mat), rownames(clin_df)), ERBB3_id]
+
+#ERBB4
+
+ERBB4_id =expr_df['ENSG00000178568.15', "gene_id"]
+
+ERBB4_name =expr_df['ENSG00000178568.15', "gene_name"]
+
+ERBB4expr_diseased = d_mat[rownames(clin_df),ERBB4_id]
+ERBB4expr_healthy = d_mat[setdiff(rownames(d_mat), rownames(clin_df)), ERBB4_id]
+
+```
+--- Creating expression plots
+```{r}
+library(ggpubr)
+library(tidyr)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(cowplot)
+library(ggplot2) 
+```
+--- Creating groups for facet wrap beesawrm
+```{r}
+group_order <- c("Diseased EGFR", "Healthy EGFR", "Diseased NT5E", "Healthy NT5E",
+                 "KRAS Diseased", "KRAS Healthy", "HIPK1 Diseased", "HIPK1 Healthy",
+                 "MAPK1 Diseased", "MAPK1 Healthy","Healthy EREG","Diseased EREG",
+                 "Healthy AREG","Diseased AREG","Healthy cd39","Diseased cd39","Healthy A2A","Diseased A2A","Healthy A2B","Diseased A2B",
+                 "Diseased ERBB2","Healthy ERBB2","Diseased ERBB3","Healthy ERBB3","Diseased ERBB4","Healthy ERBB4")
+
+
+data_all <- data.frame(
+  Expression = c(EGFRexpr_diseased, EGFRexpr_healthy, NT5Eexpr_diseased, NT5Eexpr_healthy,
+                 KRASexpr_diseased, KRASexpr_healthy, HIPK1expr_diseased,
+                 HIPK1expr_healthy, MAPK1expr_diseased, MAPK1expr_healthy,AREGexpr_diseased, AREGexpr_healthy, EREGexpr_diseased,
+                 EREGexpr_healthy, cd39expr_diseased, cd39expr_healthy,ERBB2expr_diseased, ERBB2expr_healthy,
+                 ERBB3expr_diseased, ERBB3expr_healthy,ERBB4expr_diseased, ERBB4expr_healthy),
+  Group = rep(c("EGFR", "EGFR", "NT5E", "NT5E",
+                "KRAS", "KRAS", "HIPK1", "HIPK1",
+                "MAPK1", "MAPK1","AREG","AREG","EREG","EREG","cd39","cd39","ERBB2","ERBB2","ERBB3","ERBB3","ERBB4","ERBB4"), 
+              times = sapply(list(EGFRexpr_diseased, EGFRexpr_healthy, NT5Eexpr_diseased,
+                                  NT5Eexpr_healthy, KRASexpr_diseased, KRASexpr_healthy,
+                                  HIPK1expr_diseased, HIPK1expr_healthy,
+                                  MAPK1expr_diseased, MAPK1expr_healthy,AREGexpr_diseased, AREGexpr_healthy, EREGexpr_diseased,
+                                  EREGexpr_healthy, cd39expr_diseased, cd39expr_healthy,ERBB2expr_diseased, ERBB2expr_healthy,
+                                  ERBB3expr_diseased, ERBB3expr_healthy,ERBB4expr_diseased, ERBB4expr_healthy), length)),
+
+  Group = rep(c("Diseased", "Healthy", "Diseased", "Healthy",
+                "Diseased", "Healthy", "Diseased", "Healthy",
+                "Diseased", "Healthy", "Diseased", "Healthy",
+                "Diseased", "Healthy", "Diseased", "Healthy",
+                "Diseased", "Healthy","Diseased", "Healthy", "Diseased", "Healthy"
+                ), 
+              times = sapply(list(EGFRexpr_diseased, EGFRexpr_healthy, NT5Eexpr_diseased,
+                                  NT5Eexpr_healthy, KRASexpr_diseased, KRASexpr_healthy,
+                                  HIPK1expr_diseased, HIPK1expr_healthy,
+                                  MAPK1expr_diseased, MAPK1expr_healthy,AREGexpr_diseased, AREGexpr_healthy, EREGexpr_diseased,
+                                  EREGexpr_healthy, cd39expr_diseased, cd39expr_healthy,ERBB2expr_diseased, ERBB2expr_healthy,
+                                  ERBB3expr_diseased, ERBB3expr_healthy,ERBB4expr_diseased, ERBB4expr_healthy),length)))
+
+#################### Add another column, Facet column of each gene, do free y axis, listapply(),
+#ifelse!, data_all(col=), make all figures cowplot, which label, prevents normalisation of data on plot
+
+library(cowplot)
+data_all$Facet<-ifelse(data_all$Group=="Diseased EGFR"|data_all$Group=="Healthy EGFR","EGFR",
+                       ifelse(data_all$Group=="Diseased NT5E"|data_all$Group=="Healthy NT5E","NT5E",
+                              ifelse(data_all$Group=="Diseased HIPK1"|data_all$Group=="Healthy HIPK1","HIPK1",
+                                     ifelse(data_all$Group=="Diseased KRAS"|data_all$Group=="Healthy KRAS","KRAS",
+                                            ifelse(data_all$Group=="Diseased MAPK1"|data_all$Group=="Healthy MAPK1","MAPK1",
+                                                   ifelse(data_all$Group=="Diseased EREG"|data_all$Group=="Healthy EREG","EREG",
+                                                          ifelse(data_all$Group=="Diseased AREG"|data_all$Group=="Healthy AREG","AREG",
+                                                                 ifelse(data_all$Group=="Diseased CD39"|data_all$Group=="Healthy cd39","cd39",
+                                                                        ifelse(data_all$Group=="Diseased ERBB2"|data_all$Group=="Healthy ERBB2","ERBB2",
+                                                                               ifelse(data_all$Group=="Diseased ERBB3"|data_all$Group=="Healthy ERBB3","ERBB3",
+                                                                                      ifelse(data_all$Group=="Diseased ERBB4"|data_all$Group=="Healthy ERBB4","ERBB4",NA
+                                                                                             
+                              
+                              )))))))))))
+
+ 
+gene_data <- data.frame(
+  Gene = rep(c("EGFR", "NT5E", "KRAS", "HIPK1", "MAPK1", "AREG", "EREG", "cd39", "ERBB2", "ERBB3", "ERBB4"), each = 2),
+  Group = rep(c("Diseased", "Healthy"), times = 11),
+  Expression = c(EGFRexpr_diseased, EGFRexpr_healthy, NT5Eexpr_diseased, NT5Eexpr_healthy,
+                 KRASexpr_diseased, KRASexpr_healthy, HIPK1expr_diseased,
+                 HIPK1expr_healthy, MAPK1expr_diseased, MAPK1expr_healthy,
+                 AREGexpr_diseased, AREGexpr_healthy, EREGexpr_diseased,
+                 EREGexpr_healthy, cd39expr_diseased, cd39expr_healthy,
+                 ERBB2expr_diseased, ERBB2expr_healthy,
+                 ERBB3expr_diseased, ERBB3expr_healthy, ERBB4expr_diseased, ERBB4expr_healthy)
+)
+
+unique(data_all$Group.2)
+
+```
+---Create comparisons to get P-values
+```{r}
+data_all$Group.2<-paste0(data_all$Group,data_all$Group.1)
+unique(data_all$Group.2)
+
+comparisons<-list(c("EGFRDiseased","EGFRHealthy"),
+                  c("NT5EDiseased","NT5EHealthy"),
+                  c("KRASDiseased","KRASHealthy"),
+                  c("HIPK1Diseased","HIPK1Healthy"),
+                  c("MAPK1Diseased","MAPK1Healthy"),
+                  c("AREGDiseased","AREGHealthy"),
+                  c("EREGDiseased","EREGHealthy"),
+                  c("cd39Diseased","cd39Healthy"),
+                  c("ERBB2Diseased","ERBB2Healthy"),
+                  c("ERBB3Diseased","ERBB3Healthy"),
+                  c("ERBB4Diseased","ERBB4Healthy")
+                  )
+group2_labels <- c( "EGFR"="EGFR",
+                    "NT5E"="NT5E",
+                    "KRAS"="KRAS",
+                    "HIPK1"="HIPK1",
+                    "MAPK1"="MAPK1",
+                    "AREG"="AREG",
+                    "EREG" ="EREG",
+                    "cd39"="cd39",
+                    "ERBB2"="ERBB2",
+                    "ERBB3"="ERBB3",
+                    "ERBB4"="ERBB4")
+```
+
+```{r}
+library(ggbeeswarm)
+
+
+data_all$ColorGroup <- factor(data_all$Group.1, levels = c("Diseased", "Healthy"))
+data_all$ColorGroup
+P1<-ggplot(data_all, aes(x = Group.2, y = Expression,fill=Group.1,col=Group.1)) +
+  geom_quasirandom(dodge.width = 1) +
+  scale_x_discrete(labels = NULL)+
+  ylab("Z Score of Gene Expression") +
+   # stat_compare_means(data = data_all, comparisons = comparisons, method = "wilcox", paired = FALSE)+ 
+  ggtitle("Distribution of Gene Expression") +
+  facet_wrap(~ Group, scales = "free")+
+  theme(axis.text.x = element_blank()) +
+  theme_cowplot() 
+   # NB: stat_compare_means(data = data_all, comparisons = comparisons, method = "wilcox", paired = FALSE) could only be ran without Facet, so P.values were taken manualy and a table was constructed next to the figure containing all P.values of comparisons.
+
+```
+---Correaltion Plots- Diseased Using pre-defined gene healthy data
+```{r}
+library(ggcorrplot)
+NT5ECOMB<-matrix(c(expr_diseased,KRASexpr_diseased,EGFRexpr_diseased,MAPK1expr_diseased,HIPK1expr_diseased
+                   ,ERBB2expr_diseased,ERBB3expr_diseased,ERBB4expr_diseased,AREGexpr_diseased,EREGexpr_diseased,cd39expr_diseased,A2aexpr_diseased,A2bexpr_diseased),ncol=13)
+
+colnames(NT5ECOMB)<-c( 'NT5E ','KRAS ',
+                       'EGFR ','ERK ','HIPK1 ','ERBB2','ERBB3','ERBB4','AREG','EREG','CD39','A2a','A2b')
+
+p.NT5EmatALLCOMBD=p.mat<-cor_pmat(NT5ECOMB)
+corr_matNT5ECOMB=cor(NT5ECOMB,method='s')
+corrplot(corr_matNT5ECOMB,method = 'square')
+cordiseasedplot<-ggcorrplot(corr_matNT5ECOMB,hc.order=F,
+           title = 'Diseased Gene Expression Spearman Correlation',
+           p.mat = p.NT5EmatALLCOMBD,sig.level = 0.05, insig = c("blank"),type='upper',
+           lab=T)+theme_cowplot()+ theme(axis.text.x = element_text(angle = 90))+labs(x = NULL)
+
+```
+--- Correlation plot diseased using pre-defined gene diseased data
+```{r}
+healthyNT5ECOMB<-matrix(c(expr_healthy,KRASexpr_healthy,EGFRexpr_healthy,MAPK1expr_healthy,HIPK1expr_healthy
+                          ,ERBB2expr_healthy,ERBB3expr_healthy,ERBB4expr_healthy,AREGexpr_healthy,EREGexpr_healthy,cd39expr_healthy,A2aexpr_healthy,A2bexpr_healthy)
+                        ,ncol=13)
+
+colnames(healthyNT5ECOMB)<-c( 'NT5E ','KRAS ',
+                              'EGFR ','ERK ','HIPK1 ','ERBB2','ERBB3','ERBB4','AREG','EREG','CD39','A2a','A2b'
+)
+View(healthyNT5ECOMB)
+p.NT5EmatALLCOMBH=p.mat<-cor_pmat(healthyNT5ECOMB)
+corr_matNT5ECOMB=cor(healthyNT5ECOMB,method='s')
+
+
+corhealthyplot <- ggcorrplot(corr_matNT5ECOMB, hc.order = FALSE,
+                             title = 'Healthy Gene Expression Spearman Correlation',
+                             p.mat = p.NT5EmatALLCOMBH, sig.level = 0.05, insig = c("blank"), type = 'upper',
+                             lab = TRUE) +
+  theme_cowplot() +
+  theme(axis.text.x = element_text(angle = 90))+labs(x = NULL) 
+corhealthyplot
+combined_plotcorr <- plot_grid(corhealthyplot,cordiseasedplot, nrow = 2,ncol = 2)
+
+
+save_plot("Overall_Corr_Plots.tiff", combined_plotcorr, base_width = 25, base_height = 15, dpi = 300)
+```
+
+
+--- Survival Curves
+```{r}
+library("TCGAbiolinks")
+library("limma")
+library("edgeR")
+library("glmnet")
+library("factoextra")
+library("FactoMineR")
+library("caret")
+library("SummarizedExperiment")
+library("gplots")
+library("survival")
+library("survminer")
+library("RColorBrewer")
+library("gProfileR")
+library("genefilter")
+library('lattice')
+```
+--- Subsetting gene expressions based on quartiles, genes taking from code above using survival object
+--- NT5E Survplot
+```{r}
+upper_quartile_NT5E <- quantile(clin_df$NT5E_value, probs = 0.75)
+lower_quartile_NT5E <- quantile(clin_df$NT5E_value, probs = 0.25)
+upper_quartile_NT5E
+# Create a new column for gene expression quartiles
+clin_df$quartileNT5E <- cut(clin_df$NT5E_value, breaks = c(min(clin_df$NT5E_value), lower_quartile_NT5E, upper_quartile_NT5E, max(clin_df$NT5E_value)),
+                        labels = c("below lower quartile", "between quartiles", "above upper quartile"), include.lowest = TRUE)
+
+subset_df <- clin_df[clin_df$quartileNT5E %in% c("above upper quartile", "below lower quartile"), ]
+
+# Fit a survival model using the subsetted data
+fit_subset <- survfit(Surv(overall_survival, deceased) ~ quartileNT5E, data = subset_df)
+pval <- surv_pvalue(fit_subset, data = clin_df)$pval
+# Plot the survival curve for upper and lower quartiles
+
+NT5EONLYPPLOT<-ggsurvplot(fit_subset, data = clin_df, surv.median.line = "hv", pval = T, legend.title = "Gene Expression NT5E")
+NT5EONLYPPLOT
+```
+--- EREG Survival Plot
+```{r}
+clin_df$EREG_value = d_mat[rownames(clin_df), EREG_id]
+
+clin_df$EREG_value
+# Calculate upper and lower quartiles
+upper_quartile_EREG <- quantile(clin_df$EREG_value, probs = 0.75)
+lower_quartile_EREG <- quantile(clin_df$EREG_value, probs = 0.25)
+upper_quartile_EREG
+
+# Create a new column for gene expression quartiles
+clin_df$quartileEREG <- cut(clin_df$EREG_value, breaks = c(min(clin_df$EREG_value), lower_quartile_EREG, upper_quartile_EREG, max(clin_df$EREG_value)),
+                            labels = c("below lower quartile", "between quartiles", "above upper quartile"), include.lowest = TRUE)
+
+subset_df_EREG <- clin_df[clin_df$quartileEREG %in% c("above upper quartile", "below lower quartile"), ]
+
+# Fit a survival model using the subsetted data
+fit_subset_EREG <- survfit(Surv(overall_survival, deceased) ~ quartileEREG, data = subset_df_EREG)
+pval <- surv_pvalue(fit_subset_EREG, data = clin_df)$pval
+# Plot the survival curve for upper and lower quartiles
+
+EREGONLYPPLOT<-ggsurvplot(fit_subset_EREG, data = clin_df, surv.median.line = "hv", pval = T, legend.title = "Gene Expression EREG")
+EREGONLYPPLOT
+```
+---AREG Survival Plot
+```{r}
+ #Get the expression values for the selected gene
+clin_df$AREG_value = d_mat[rownames(clin_df), AREG_id]
+
+clin_df$AREG_value
+# Calculate upper and lower quartiles
+upper_quartile_AREG <- quantile(clin_df$AREG_value, probs = 0.75)
+lower_quartile_AREG <- quantile(clin_df$AREG_value, probs = 0.25)
+upper_quartile_AREG
+
+# Create a new column for gene expression quartiles
+clin_df$quartileAREG <- cut(clin_df$AREG_value, breaks = c(min(clin_df$AREG_value), lower_quartile_AREG, upper_quartile_AREG, max(clin_df$AREG_value)),
+                            labels = c("below lower quartile", "between quartiles", "above upper quartile"), include.lowest = TRUE)
+subset_df_AREG <- clin_df[clin_df$quartileAREG %in% c("above upper quartile", "below lower quartile"), ]
+
+# Fit a survival model using the subsetted data
+fit_subset_AREG <- survfit(Surv(overall_survival, deceased) ~ quartileAREG, data = subset_df_AREG)
+pval <- surv_pvalue(fit_subset_EREG, data = clin_df)$pval
+# Plot the survival curve for upper and lower quartiles
+
+AREGONLYPPLOT<-ggsurvplot(fit_subset_AREG, data = clin_df, surv.median.line = "hv", pval = T, legend.title = "Gene Expression AREG")
+AREGONLYPPLOT
+                            
+```
+--- NT5E and AREG/EREG fit
+```{r}
+subset_df_NT5E_EREG_hi <- clin_df[clin_df$quartileNT5E == "above upper quartile" & clin_df$quartileEREG == "above upper quartile", ]
+subset_df_NT5E_EREG_lo <- clin_df[clin_df$quartileNT5E == "below lower quartile" & clin_df$quartileEREG== "below lower quartile", ]
+subset_df_NT5E_hi_EREG_lo <- clin_df[clin_df$quartileNT5E == "above upper quartile" & clin_df$quartileEREG == "below lower quartile", ]
+subset_df_NT5E_lo_EREG_hi <- clin_df[clin_df$quartileNT5E == "below lower quartile" & clin_df$quartileEREG == "above upper quartile", ]
+## AREG
+subset_df_NT5E_AREG_hi <- clin_df[clin_df$quartileNT5E == "above upper quartile" & clin_df$quartileAREG == "above upper quartile", ]
+subset_df_NT5E_AREG_lo <- clin_df[clin_df$quartileNT5E == "below lower quartile" & clin_df$quartileAREG== "below lower quartile", ]
+subset_df_NT5E_hi_AREG_lo <- clin_df[clin_df$quartileNT5E == "above upper quartile" & clin_df$quartileAREG == "below lower quartile", ]
+subset_df_NT5E_lo_AREG_hi <- clin_df[clin_df$quartileNT5E == "below lower quartile" & clin_df$quartileAREG == "above upper quartile", ]
+# Fit survival models for the quartile combinations
+fit_subset <- survfit(Surv(overall_survival, deceased) ~ quartile, data = subset_df)
+subset_df_NT5E_AREG_hi
+#EREG
+fit_NT5E_EREG_hi <- survfit(Surv(overall_survival, deceased) ~ 1, data = subset_df_NT5E_EREG_hi)
+fit_NT5E_EREG_lo <- survfit(Surv(overall_survival, deceased) ~ 1, data = subset_df_NT5E_EREG_lo)
+fit_NT5E_hi_EREG_lo <- survfit(Surv(overall_survival, deceased) ~ 1, data = subset_df_NT5E_hi_EREG_lo)
+fit_NT5E_lo_EREG_hi <- survfit(Surv(overall_survival, deceased) ~ 1, data = subset_df_NT5E_lo_EREG_hi)
+#AREG
+fit_NT5E_AREG_hi <- survfit(Surv(overall_survival, deceased) ~ 1, data = subset_df_NT5E_AREG_hi)
+fit_NT5E_AREG_lo <- survfit(Surv(overall_survival, deceased) ~ 1, data = subset_df_NT5E_AREG_lo)
+fit_NT5E_hi_AREG_lo <- survfit(Surv(overall_survival, deceased) ~ 1, data = subset_df_NT5E_hi_AREG_lo)
+fit_NT5E_lo_AREG_hi <- survfit(Surv(overall_survival, deceased) ~ 1, data = subset_df_NT5E_lo_AREG_hi)
+
+### Works to here
+
+
+# Getting p_values for combinations
+combined_subset_df_EREG <- rbind(subset_df_NT5E_EREG_hi, subset_df_NT5E_EREG_lo)
+combined_subset_df_EREG$Group <- factor(c(rep("NT5E_EREG_hi", nrow(subset_df_NT5E_EREG_hi)),
+                                     rep("NT5E_EREG_lo", nrow(subset_df_NT5E_EREG_lo))))
+
+
+# Plot the survival curves for the quartile combinations EREG
+
+NT5E_EREG_hi_plot <- ggsurvplot(fit_NT5E_EREG_hi, data = subset_df_NT5E_EREG_hi, risk.table = TRUE,
+                                 conf.int = TRUE, legend.title = "Gene Expression NT5Ehi EREGhi",
+                                 legend.labs = c("NT5E_hi + EREG_hi"),
+                                 surv.median.line = "hv")
+NT5E_EREG_hi_plot
+NT5E_EREG_lo_plot <- ggsurvplot(fit_NT5E_EREG_lo, data = subset_df_NT5E_EREG_lo, risk.table = TRUE,
+                                 conf.int = TRUE, legend.title = "Gene Expression NT5Elo EREGlo",
+                                 legend.labs = c("NT5E_lo + EREG_lo"),
+                                 surv.median.line = "hv")
+NT5E_EREG_lo_plot
+
+NT5E_hi_EREG_lo_plot <- ggsurvplot(fit_NT5E_hi_EREG_lo, data = subset_df_NT5E_hi_EREG_lo, risk.table = TRUE, 
+                                    conf.int = TRUE, legend.title = "Gene Expression NT5Ehi EREGlo",
+                                    legend.labs = c("NT5E_hi + EREG_lo"),
+                                    surv.median.line = "hv")
+NT5E_hi_EREG_lo_plot
+
+NT5E_lo_EREG_hi_plot <- ggsurvplot(fit_NT5E_lo_EREG_hi, data = subset_df_NT5E_lo_EREG_hi, risk.table = TRUE,
+                                    conf.int = TRUE, legend.title = "Gene Expression NT5Elo EREGhi",
+                                    legend.labs = c("NT5E_lo + EREG_hi")
+)
+
+NT5E_lo_EREG_hi_plot
+
+# Plot the survival curves for the quartile combinations AREG
+pvalNT5REGhi <- surv_pvalue(fit_NT5E_AREG_hi, data = subset_df_NT5E_AREG_hi)$pval
+
+NT5E_AREG_hi_plot <- ggsurvplot(fit_NT5E_AREG_hi, data = subset_df_NT5E_AREG_hi, risk.table = TRUE,
+                                 conf.int = TRUE, legend.title = "Gene Expression NT5Ehi AREGhi",
+                                 legend.labs = c("NT5E_hi + AREG_hi"),
+                                 surv.median.line = "hv")
+NT5E_AREG_hi_plot
+NT5E_AREG_lo_plot <- ggsurvplot(fit_NT5E_AREG_lo, data = subset_df_NT5E_AREG_lo, risk.table = TRUE,
+                                 conf.int = TRUE, legend.title = "Gene Expression NT5Elo AREGlo",
+                                 legend.labs = c("NT5E_lo + AREG_lo"),
+                                 surv.median.line = "hv")
+NT5E_AREG_lo_plot
+
+NT5E_hi_AREG_lo_plot <- ggsurvplot(fit_NT5E_hi_AREG_lo, data = subset_df_NT5E_hi_AREG_lo, risk.table = TRUE, 
+                                    conf.int = TRUE, legend.title = "Gene Expression NT5Ehi AREGlo",
+                                    legend.labs = c("NT5E_hi + AREG_lo"),
+                                    surv.median.line = "hv")
+NT5E_hi_AREG_lo_plot
+
+NT5E_lo_AREG_hi_plot <- ggsurvplot(fit_NT5E_lo_AREG_hi, data = subset_df_NT5E_lo_AREG_hi, risk.table = TRUE,
+                                    conf.int = TRUE, legend.title = "Gene Expression NT5Elo AREGhi",
+                                    legend.labs = c("NT5E_lo + AREG_hi")
+)
+
+NT5E_lo_AREG_hi_plot
+clin_df$combined_quartile_EREGNT5E <- paste(clin_df$quartileNT5E, clin_df$quartileEREG, sep = "_")
+
+combined_survfit_EREGNT5E <- survfit(Surv(overall_survival, deceased) ~ combined_quartile_EREGNT5E, data = clin_df)
+combined_survfit_EREGNT5E$group <- rep(c("subset_df_NT5E_EREG_hi", "subset_df_NT5E_EREG_lo", "subset_df_NT5E_hi_EREG_lo ", "subset_df_NT5E_lo_EREG_hi"),
+                                      each = nrow(clin_df))
+
+
+
+subset_df_EREGNT5E <- clin_df[clin_df$quartileNT5E %in% c("above upper quartile", "below lower quartile") & clin_df$quartileEREG %in% c("above upper quartile", "below lower quartile"), ]
+
+# Fit survival model for the selected quartile combinations
+combined_survfit_EREGNT5E <- survfit(Surv(overall_survival, deceased) ~ quartileNT5E + quartileEREG, data = subset_df_EREGNT5E)
+```
+---AREG NT5E survivalplot
+```{r}
+combined_plotSurv_EREGNT5E <- ggsurvplot(combined_survfit_EREGNT5E, data = subset_df_EREGNT5E,
+                                        #pval = p_val,
+                                        legend.title = "Gene Expression Levels",
+                                        legend.labs = c("NT5E_lo_EREG_lo", "NT5E_lo_EREG_hi", "NT5E_hi_EREG_lo", "NT5E_hi_EREG_hi"),
+                                        surv.median.line = "hv",
+                                        risk.table = TRUE)
+
+combined_plotSurv_EREGNT5E
+
+
+####AREG Survplot
+clin_df$combined_quartile_AREGNT5E <- paste(clin_df$quartileNT5E, clin_df$quartileAREG, sep = "_")
+
+combined_survfit_AREGNT5E <- survfit(Surv(overall_survival, deceased) ~ combined_quartile_AREGNT5E, data = clin_df)
+combined_survfit_AREGNT5E$group <- rep(c("subset_df_NT5E_AREG_hi", "subset_df_NT5E_AREG_lo", "subset_df_NT5E_hi_AREG_lo ", "subset_df_NT5E_lo_AREG_hi"),
+                                      each = nrow(clin_df))
+clin_df$quartileAREG
+subset_df_AREGNT5E <- clin_df[clin_df$quartileNT5E %in% c("above upper quartile", "below lower quartile") & clin_df$quartileAREG %in% c("above upper quartile", "below lower quartile"), ]
+unique(subset_df_AREGNT5E$quartileAREG)
+unique(subset_df_AREGNT5E$quartileNT5E)
+
+# Fit survival model for the selected quartile combinations
+combined_survfitE_AREGNT5E <- survfit(Surv(overall_survival, deceased) ~ quartileNT5E + quartileAREG, data = subset_df_AREGNT5E)
+unique(combined_survfit_AREGNT5E$group)
+unique(subset_df_AREGNT5E$com)
+
+combined_plotSurv_AREGNT5E <- ggsurvplot(combined_survfitE_AREGNT5E, data = subset_df_AREGNT5E,
+                                        #pval = p_val,
+                                        legend.title = "Gene Expression Levels",
+                                        legend.labs = c("NT5E_lo_AREG_lo", "NT5E_lo_AREG_hi", "NT5E_hi_AREG_lo", "NT5E_hi_AREG_hi"),
+                                        surv.median.line = "hv",
+                                        risk.table = TRUE)
+
+combined_plotSurv_AREGNT5E
+```
+--- Coxph -hazard ratios for NT5E, EREG+NT5E survival curves
+```{r}
+library(lubridate)
+library(ggsurvfit)
+library(gtsummary)
+library(tidycmprsk)
+### NT5E EREG coxph
+subset_df_EREGNT5E$Combined_Expression <- paste0("NT5E_", subset_df_EREGNT5E$NT5E_Expression, "_EREG_", subset_df_EREGNT5E$EREG_Expression)
+
+
+# Perform Cox regression for NT5Elo & EREGhi vs. NT5Elo & EREGlo (Reference)
+subset_df_EREGNT5E$Combined_Expression <- relevel(factor(subset_df_EREGNT5E$Combined_Expression), ref = "NT5E_lo_EREG_lo")
+
+coxph(Surv(overall_survival, deceased) ~ Combined_Expression, data = subset_df_EREGNT5E,
+                       subset = Combined_Expression %in% c("NT5E_lo_EREGlo","NT5E_lo_EREG_hi", "NT5E_lo_EREG_lo","NT5E_hi_EREG_lo","NT5E_hi_EREG_hi")) %>% 
+  tbl_regression(exp = TRUE) 
+#### NT5E coxph
+coxph(Surv(overall_survival, deceased) ~ NT5E_Expression, data = subset_df_EREGNT5E) %>% 
+  tbl_regression(exp = TRUE) 
+##### P values between comparisons also obtained most significnact pValue plotted on graphs, repeated for AREG+NT5E, ERBB2+KRAS comparisons
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+---KRAS survivalplot
+```{r}
+clin_df$KRAS_value=expr_df[rownames(clin_df), KRAS_id]
+
+clin_df$KRAS_value = d_mat[rownames(clin_df), KRAS_id]
+
+View(clin_df$ERBB2_value)
+# Calculate upper and lower quartiles
+upper_quartile_KRAS <- quantile(clin_df$KRAS_value, probs = 0.75)
+lower_quartile_KRAS <- quantile(clin_df$KRAS_value, probs = 0.25)
+
+# Create a new column for gene expression quartiles
+clin_df$quartile_KRAS <- cut(clin_df$KRAS_value, breaks = c(min(clin_df$KRAS_value), lower_quartile_KRAS, upper_quartile_KRAS, max(clin_df$KRAS_value)),
+                        labels = c("below lower quartile", "between quartiles", "above upper quartile"), include.lowest = TRUE)
+
+# Subset the data to include only the upper and lower quartiles
+subset_df_quartiles_KRAS <- clin_df[clin_df$quartile_KRAS %in% c("above upper quartile", "below lower quartile"), ]
+
+# Fit a survival model using the subsetted data
+fit_quartiles_KRAS <- survfit(Surv(overall_survival, deceased) ~ quartile_KRAS, data = subset_df_quartiles_KRAS)
+pvalKRAS <- surv_pvalue(fit_quartiles_KRAS, data = subset_df_quartiles_KRAS)$pval
+
+KRASONLYPPLOT<-ggsurvplot(fit_quartiles_KRAS, data = subset_df_quartiles_KRAS, surv.median.line = "hv", pval = T, legend.title = "Gene Expression KRAS")
+KRASONLYPPLOT
+```
+---ERBB2 Survivalplot
+```{r}
+clin_df$ERBB2_value=expr_df[rownames(clin_df), ERBB2_id]
+
+clin_df$ERBB2_value = d_mat[rownames(clin_df), ERBB2_id]
+View(clin_df$ERBB2_value)
+# Calculate upper and lower quartiles
+upper_quartile_ERBB2 <- quantile(clin_df$ERBB2_value, probs = 0.75)
+lower_quartile_ERBB2 <- quantile(clin_df$ERBB2_value, probs = 0.25)
+
+# Create a new column for gene expression quartiles
+clin_df$quartile_ERBB2 <- cut(clin_df$ERBB2_value, breaks = c(min(clin_df$ERBB2_value), lower_quartile_ERBB2, upper_quartile_ERBB2, max(clin_df$ERBB2_value)),
+                        labels = c("below lower quartile", "between quartiles", "above upper quartile"), include.lowest = TRUE)
+
+# Subset the data to include only the upper and lower quartiles
+subset_df_quartiles_ERBB2 <- clin_df[clin_df$quartile_ERBB2 %in% c("above upper quartile", "below lower quartile"), ]
+
+# Fit a survival model using the subsetted data
+fit_quartiles_ERBB2 <- survfit(Surv(overall_survival, deceased) ~ quartile_ERBB2, data = subset_df_quartiles_ERBB2)
+pvalK <- surv_pvalue(fit_quartiles_ERBB2, data = subset_df_quartiles_ERBB2)$pval
+subset_df_quartiles_ERBB2
+
+ERBB2ONLYPPLOT<-ggsurvplot(fit_quartiles_ERBB2, data = subset_df_quartiles_ERBB2, surv.median.line = "hv", pval = T, legend.title = "Gene Expression ERBB2")
+ERBB2ONLYPPLOT
+```
+---KRAS and ERBB2 Combined Survival Plots
+```{r}
+# Create quartile categories for KRAS and ERBB2
+clin_df$NT5E_quartile <- cut(clin_df$KRAS_value, breaks = c(min(clin_df$KRAS_value), lower_quartile_KRAS, upper_quartile_KRAS, max(clin_df$KRAS_value)),
+                             labels = c("KRAS_lo", "KRAS_between", "KRAS_hi"), include.lowest = TRUE)
+clin_df$ERBB2_quartile <- cut(clin_df$ERBB2_value, breaks = c(min(clin_df$ERBB2_value), lower_quartile_ERBB2, upper_quartile_ERBB2, max(clin_df$ERBB2_value)),
+                              labels = c("ERBB2_lo","ERBB2 between", "ERBB2_hi"), include.lowest = TRUE)
+
+# Subset the data based on the quartile combinations
+View(subset_df_KRAS_hi_ERBB2_lo)
+clin_df$quartile_KRAS
+subset_df_KRAS_ERBB2_hi <- clin_df[clin_df$quartile_KRAS == "above upper quartile" & clin_df$quartile_ERBB2 == "above upper quartile", ]
+subset_df_KRAS_ERBB2_lo <- clin_df[clin_df$quartile_KRAS == "below lower quartile" & clin_df$quartile_ERBB2== "below lower quartile", ]
+subset_df_KRAS_hi_ERBB2_lo <- clin_df[clin_df$quartile_KRAS == "above upper quartile" & clin_df$quartile_ERBB2 == "below lower quartile", ]
+subset_df_KRAS_lo_ERBB2_hi <- clin_df[clin_df$quartile_KRAS == "below lower quartile" & clin_df$quartile_ERBB2 == "above upper quartile", ]
+
+# Fit survival models for the quartile combinations
+fit_subset <- survfit(Surv(overall_survival, deceased) ~ quartile, data = subset_df)
+subset_df_KRAS_ERBB2_hi
+fit_KRAS_ERBB2_hi <- survfit(Surv(overall_survival, deceased) ~ 1, data = subset_df_KRAS_ERBB2_hi)
+fit_KRAS_ERBB2_lo <- survfit(Surv(overall_survival, deceased) ~ 1, data = subset_df_KRAS_ERBB2_lo)
+fit_KRAS_hi_ERBB2_lo <- survfit(Surv(overall_survival, deceased) ~ 1, data = subset_df_KRAS_hi_ERBB2_lo)
+fit_KRAS_lo_ERBB2_hi <- survfit(Surv(overall_survival, deceased) ~ 1, data = subset_df_KRAS_lo_ERBB2_hi)
+
+# Getting p_values for combinations
+combined_subset_df <- rbind(subset_df_KRAS_ERBB2_hi, subset_df_KRAS_ERBB2_lo)
+combined_subset_df$Group <- factor(c(rep("KRAS_ERBB2_hi", nrow(subset_df_KRAS_ERBB2_hi)),
+                                     rep("KRAS_ERBB2_lo", nrow(subset_df_KRAS_ERBB2_lo))))
+p_value_KRAS_ERBB2 <- survdiff(Surv(overall_survival, deceased) ~ Group, data = combined_subset_df)$chisq[1]
+p_value_KRAS_ERBB2
+
+# Plot the survival curves for the quartile combinations
+pvalKRASERBBhi <- surv_pvalue(fit_KRAS_ERBB2_hi, data = subset_df_KRAS_ERBB2_hi)$pval
+
+KRAS_ERBB2_hi_plot <- ggsurvplot(fit_KRAS_ERBB2_hi, data = subset_df_KRAS_ERBB2_hi, risk.table = TRUE,
+                                 conf.int = TRUE, legend.title = "Gene Expression KRAShi ERBB2hi",
+                                 legend.labs = c("KRAS_hi + ERBB2_hi"),
+                                 surv.median.line = "hv")
+KRAS_ERBB2_hi_plot
+KRAS_ERBB2_lo_plot <- ggsurvplot(fit_KRAS_ERBB2_lo, data = subset_df_KRAS_ERBB2_lo, risk.table = TRUE,
+                                 conf.int = TRUE, legend.title = "Gene Expression KRASlo ERBB2lo",
+                                 legend.labs = c("KRAS_lo + ERBB2_lo"),
+                                 surv.median.line = "hv")
+KRAS_ERBB2_lo_plot
+
+KRAS_hi_ERBB2_lo_plot <- ggsurvplot(fit_KRAS_hi_ERBB2_lo, data = subset_df_KRAS_hi_ERBB2_lo, risk.table = TRUE, 
+                                    conf.int = TRUE, legend.title = "Gene Expression KRAShi ERBB2lo",
+                                    legend.labs = c("KRAS_hi + ERBB2_lo"),
+                                    surv.median.line = "hv")
+KRAS_hi_ERBB2_lo_plot
+
+KRAS_lo_ERBB2_hi_plot <- ggsurvplot(fit_KRAS_lo_ERBB2_hi, data = subset_df_KRAS_lo_ERBB2_hi, risk.table = TRUE,
+                                    conf.int = TRUE, legend.title = "Gene Expression KRASlo ERBB2hi",
+                                    legend.labs = c("KRAS_lo + ERBB2_hi")
+                                )
+
+KRAS_lo_ERBB2_hi_plot
+# Plot survival fits on the same graph
+# Create a new column to identify quartile combinations
+clin_df$combined_quartileERBBKRAS <- paste(clin_df$quartile_KRAS, clin_df$quartile_ERBB2, sep = "_")
+
+combined_survfitERBBKRAS <- survfit(Surv(overall_survival, deceased) ~ combined_quartileERBBKRAS, data = clin_df)
+combined_survfitERBBKRAS$group <- rep(c("subset_df_KRAS_ERBB2_hi", "subset_df_KRAS_ERBB2_lo", "subset_df_KRAS_hi_ERBB2_lo ", "subset_df_KRAS_lo_ERBB2_hi"),
+                              each = nrow(clin_df))
+
+
+
+subset_dfERBBKRAS <- clin_df[clin_df$quartile_KRAS %in% c("above upper quartile", "below lower quartile") & clin_df$quartile_ERBB2 %in% c("above upper quartile", "below lower quartile"), ]
+
+# Fit survival model for the selected quartile combinations
+combined_survfitERBBKRAS <- survfit(Surv(overall_survival, deceased) ~ quartile_KRAS + quartile_ERBB2, data = subset_dfERBBKRAS)
+
+combined_plotSurvERBBKRAS <- ggsurvplot(combined_survfitERBBKRAS, data = subset_dfERBBKRAS,
+                                #pval = p_val,
+                                legend.title = "Gene Expression Levels",
+                                legend.labs = c("KRAS_lo_ERBB2_lo", "KRAS_lo_ERBB2_hi", "KRAS_hi_ERBB2_lo", "KRAS_hi_ERBB2_hi"),
+                                surv.median.line = "hv",
+                                risk.table = TRUE)
+
+
+combined_plotSurvERBBKRAS
+
+```
+---Differetial gene expression analysis bewteen NT5Ehi and NT5Elo clusters
+```{r}
+library(SingleCellExperiment)
+library(enrichR)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(matrixStats)
+library(MatrixGenerics)
+library(installr)
+library("TCGAbiolinks")
+library("limma")
+library("edgeR")
+library("glmnet")
+library("factoextra")
+library("FactoMineR")
+library("caret")
+library("SummarizedExperiment")
+library("gplots")
+library("survival")
+library("survminer")
+library("RColorBrewer")
+library("gProfileR")
+library("genefilter")
+library(data.table)
+```
+--- Using NT5Ehi and NT5Elo data based on expression quartiles, upper and lower quartiles.
+```{r}
+# Calculate upper and lower quartiles
+upperquartile <- quantile(tcga_gene_expression_matrix['ENSG00000135318.12', ], probs = 0.75, type = 7)
+expr_samples_above_quartile_mat <- tcga_gene_expression_matrix[, tcga_gene_expression_matrix['ENSG00000135318.12', ] > upperquartile]
+
+
+
+lowerquartile <- quantile(tcga_gene_expression_matrix['ENSG00000135318.12', ], probs = 0.25, type = 7)
+
+expr_samples_below_quartile_mat <- tcga_gene_expression_matrix[, tcga_gene_expression_matrix['ENSG00000135318.12', ] < lowerquartile]
+```
+--- Using Limma Package for DEA, using NT5Ehi and NT5Elo as condition var. NT5Elo as reference
+```{r}
+#create a condition of hi and lo for the two matrices before combining as single assay in a SE
+condition_var_hi <- rep("hi", ncol(expr_samples_above_quartile_mat))
+condition_var_lo <- rep("lo", ncol(expr_samples_below_quartile_mat))
+condition_var <- factor(c(condition_var_hi, condition_var_lo))
+NT5E_se <- SummarizedExperiment(
+  assays = SimpleList(combined = cbind(expr_samples_above_quartile_mat, expr_samples_below_quartile_mat)),
+  colData = DataFrame(condition = condition_var)
+)
+NT5E_se$condition
+
+# Creating a condition variable to allow a downstream DEA between hi and lo NT5E expression samples
+
+
+design = model.matrix(~condition_var)
+dge = DGEList(counts=cbind(expr_samples_above_quartile_mat, expr_samples_below_quartile_mat),
+              samples=condition_var)
+
+# filtering
+keep = filterByExpr(dge,design)
+dge = dge[keep,,keep.lib.sizes=FALSE]
+rm(keep)
+
+# Normalization (TMM followed by voom)
+dge = calcNormFactors(dge)
+v = voom(dge, design, plot=TRUE)
+
+# Fit model to data given design
+fit = lmFit(v, design)
+fit = eBayes(fit)
+
+summer.fit=decideTests(fit)
+summary(summer.fit)
+
+limma.resNT5E <- topTable(fit,coef=2,number=Inf)
+limma.resNT5E$logFC
+dim(limma.res)
+saveRDS(object = limma.resNT5E,
+         file = "limma.res.RDS",
+         compress = FALSE)
+limma.resNT5E = readRDS(file = "limma.res.RDS")
+limma.resSolidTumour<-topTable(fit)
+```
+--- Getting Replacing ensembl IDs with gene symbols
+```{r}
+rownames(limma.res_high) <- sub("\\..*", "", rownames(limma.res_high))
+rownames(limma.res_low) <- sub("\\..*", "", rownames(limma.res_low))
+
+ens2symbol_high<- AnnotationDbi::select(org.Hs.eg.db,keys = rownames(limma.res_high),                                   columns="SYMBOL",keytype="ENSEMBL")
+
+ens2symbol_low<- AnnotationDbi::select(org.Hs.eg.db,keys = rownames(limma.res_low),                                             columns="SYMBOL",keytype="ENSEMBL")
+
+ens2symbol_high<- as_tibble(ens2symbol_high)
+
+ens2symbol_low <- as_tibble(ens2symbol_low)
+
+
+```
+--- Getting ranked set of genes based on the moderated T statistic from the DEA for Gene set enrichment analysis (GSEA).
+```{r}
+###### Ranked genes T value
+limma.res_high$t
+res2_low <- limma.res_low %>% 
+  dplyr::select(SYMBOL, t) %>% 
+  na.omit() %>% 
+  group_by(SYMBOL) %>% 
+  summarize(t = mean(t)) %>%
+  distinct()
+res2_high <- limma.res_high %>% 
+  dplyr::select(SYMBOL, t) %>% 
+  na.omit() %>% 
+  group_by(SYMBOL) %>% 
+  summarize(t = mean(t)) %>%
+  distinct()
+```
+---GSEA
+```{r}
+library(fgsea)
+library(GSEABase)
+library(stats)
+packageVersion("fgsea")
+ranks_high <- deframe(res2_high)
+ranks_low <- deframe(res2_low)
+```
+--- Getting gene sets from the MsigDB- https://www.gsea-msigdb.org/gsea/index.jsp 
+```{r}
+pathways.hallmark <- gmtPathways("c2.cp.wikipathways.v2023.1.Hs.symbols (2).gmt")
+
+pathways.hallmark %>% 
+  head() %>% 
+  lapply(head)
+
+```
+--- Running Fgsea, NOTE computer cant do more than 300 permutations
+```{r}
+fgseaRes_high_pos <- fgsea(pathways=pathways.hallmark, stats=ranks_high,nperm=300,scoreType='pos')
+fgseaRes_high_neg <- fgsea(pathways=pathways.hallmark, stats=ranks_high,nperm=300,scoreType='neg')
+
+fgseaRes_low_pos <- fgsea(pathways=pathways.hallmark, stats=ranks_low,nperm=300,scoreType="pos")
+fgseaRes_low_neg<- fgsea(pathways=pathways.hallmark, stats=ranks_low
+```
+--- Creating upregulated and down regulated pathway plots in each condition
+```{r}
+fgseaResTidy_high_pos <- fgseaRes_high_pos %>%
+  as_tibble() %>%
+  arrange(desc(NES)),
+
+
+fgseaResTidy_high_pos %>% 
+  dplyr::select(-leadingEdge, -ES, -nMoreExtreme) %>% 
+  arrange(padj) %>% 
+  DT::datatable(),
+
+
+fgseaResTidy_high_neg <- fgseaRes_high_neg %>%
+  as_tibble() %>%
+  arrange(desc(NES)),
+
+
+fgseaResTidy_high_neg %>% 
+  dplyr::select(-leadingEdge, -ES, -nMoreExtreme) %>% 
+  arrange(padj) %>% 
+  DT::datatable(),
+
+
+
+#####NT5Elo
+fgseaResTidy_low_pos <- fgseaRes_low_pos%>%
+  as_tibble() %>%
+  arrange(desc(NES)),
+
+
+fgseaResTidy_low_pos %>% 
+  dplyr::select(-leadingEdge, -ES, -nMoreExtreme) %>% 
+  arrange(padj) %>% 
+  DT::datatable(),
+
+fgseaResTidy_low_neg <- fgseaRes_low_neg%>%
+  as_tibble() %>%
+  arrange(desc(NES)),
+
+
+fgseaResTidy_low_neg %>% 
+  dplyr::select(-leadingEdge, -ES, -nMoreExtreme) %>% 
+  arrange(padj) %>% 
+  DT::datatable()
+
+
+```
+---Creating plots from Fsgea results
+```{r}
+library(ggplot2)
+library(dplyr)
+
+NT5E_low_GSEA_pos <- fgseaResTidy_low_pos %>%
+  filter(pval < 0.05) %>%
+  arrange(desc(NES)) %>%
+  dplyr::slice(1:10) %>%
+  ggplot(aes(reorder(pathway, NES), NES)) +
+  geom_col(fill='green') +
+  coord_flip() +
+  labs(
+    x = "Pathway",
+    y = "Normalized Enrichment Score",
+    title = "Top Upregulated Wikipathways NES from GSEA for NT5Elo Lung Adenocarcinoma Samples"
+  ) +
+  theme_minimal()
+NT5E_high_GSEA_neg
+
+NT5E_low_GSEA_pos
+NT5E_low_GSEA_neg <- fgseaResTidy_low_neg %>%
+  filter(pval < 0.05) %>%
+  arrange(desc(NES)) %>%
+  dplyr::slice(1:10) %>%
+  ggplot(aes(reorder(pathway, NES), NES)) +
+  geom_col(fill='orange') +
+  coord_flip() +
+  labs(
+    x = "Pathway",
+    y = "Normalized Enrichment Score",
+    title = "Top Downregulated Wikipathways NES from GSEA for NT5Elo Lung Adenocarcinoma Samples"
+  ) +
+  theme_minimal()
+
+NT5E_low_GSEA_neg
+
+print(NT5E_low_GSEA)
+NT5E_high_GSEA_pos <- fgseaResTidy_high_pos %>%
+  filter(pval < 0.05) %>%
+  arrange(desc(NES)) %>%
+  dplyr::slice(1:10) %>%
+  ggplot(aes(reorder(pathway, NES), NES)) +
+  geom_col(fill='green') +
+  coord_flip() +
+  labs(
+    x = "Pathway",
+    y = "Normalized Enrichment Score",
+    title = "Top Upregulated Wikipathways NES from GSEA for NT5Ehi Lung Adenocarcinoma Samples"
+  ) +
+  theme_minimal()
+NT5E_high_GSEA_neg <- fgseaResTidy_high_neg %>%
+  filter(pval < 0.05) %>%
+  arrange(desc(NES)) %>%
+  dplyr::slice(1:10) %>%
+  ggplot(aes(reorder(pathway, NES), NES)) +
+  geom_col(fill='orange') +
+  coord_flip() +
+  labs(
+    x = "Pathway",
+    y = "Normalized Enrichment Score",
+    title = "Top Downregulated Wikipathways NES from GSEA for NT5Ehi Lung Adenocarcinoma Samples"
+  ) +
+  theme_minimal()
+```
+---Saving Plots
+```{r}
+combined_GSEA_plot_NT5Elo <- plot_grid(NT5E_low_GSEA_neg,NT5E_low_GSEA_pos)
+
+combined_GSEA_plot_NT5Ehi <- plot_grid(NT5E_high_GSEA_neg,NT5E_high_GSEA_pos)
+
+
+save_plot("Wikipathways NT5Ehi pos 30.tiff",NT5E_high_GSEA_pos, base_height = 15,base_width = 15)
+save_plot("Wikipathways NT5Ehi neg 30.tiff",NT5E_high_GSEA_neg, base_height = 15,base_width = 15)
+
+
+save_plot("Wikipathways NT5Elo pos 30.tiff",NT5E_low_GSEA_pos, base_height = 15,base_width = 15)
+save_plot("Wikipathways NT5Elo neg 30.tiff",NT5E_low_GSEA_neg, base_height = 15,base_width = 15)
+
+```
+---Immune deconvolution
+```{r}
+library(immunedeconv)
+library(EPIC)
+library(biomaRt)
+library(RColorBrewer)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(immunedeconv)
+library(tibble)
+library(dplyr)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(cowplot)
+library(gridExtra)
+
+```
+--- Seperating Tumour Samples, renaming emsembl IDs with Gene Symbols
+```{r}
+Gene_expression_matrix <- limma_res$voomObj[limma_res$voomObj$targets$definition == 'Primary solid Tumor',]
+rownames(Gene_expression_matrix$E)<- NULL
+rownames(Gene_expression_matrix$E)<- Gene_expression_matrix$genes[,7]
+View(Gene_expression_matrix$E)
+rownames(Gene_expression_matrix$E)
+dim(Gene_expression_matrix$E)
+```
+--- Defining NT5Ehi and NT5Elo samples
+```{r}
+###NT5Ehi
+
+upperquartile<-apply(Gene_expression_matrix$E, 1, quantile, probs = 0.773)
+samples_above_quartile <- Gene_expression_matrix$E['NT5E',Gene_expression_matrix$targets$definition=='Primary solid Tumor'] > upperquartile['NT5E']
+expr_samples_above_quartile_mat <- Gene_expression_matrix$E[,samples_above_quartile]
+dim(expr_samples_above_quartile_mat)
+
+
+
+
+##### low expression of NT5E
+lowerquartile<-apply(Gene_expression_matrix$E, 1, quantile, probs = 0.25)
+samples_below_quartile <- Gene_expression_matrix$E['NT5E',Gene_expression_matrix$targets$definition=='Primary solid Tumor'] < lowerquartile['NT5E']
+expr_samples_below_quartile_mat <- Gene_expression_matrix$E[,samples_below_quartile]
+
+```
+---Running xCell deconvolution from immundeconv package
+```{r}
+NT5E_hi_res_xcell <- deconvolute(expr_samples_above_quartile_mat, "xcell", tumor = TRUE)
+
+
+NT5ELOres_xcell <- deconvolute(expr_samples_below_quartile_mat, "xcell", tumor = TRUE)
+
+```
+--- Simplifying results by grouping cell types based on common phenotype characteristics
+```{r}
+# Combine the data using bind_rows
+names(NT5E_hi_res_xcell) <- c("cell_type", as.character(seq_along(NT5E_hi_res_xcell)[-1]))
+names(NT5ELOres_xcell) <- c("cell_type", as.character(seq_along(NT5ELOres_xcell)[-1]))
+
+combined_data_long <- rbind(
+  NT5E_hi_res_xcell %>% mutate(matrix = "NT5E hi"),
+  NT5ELOres_xcell %>% mutate(matrix = "NT5E lo"))
+View(combined_data_long)
+# Define the cell type groups based on combining rows
+cell_type_groups <- c(
+  "T Cell CD4+" = c("T cell CD4+ memory", "T cell CD4+ naive", "T cell CD4+ (non-regulatory)", "T cell CD4+ central memory", "T cell CD4+ effector memory", "T cell CD4+ Th1", "T cell CD4+ Th2"),
+  "T Cell CD8+" = c("T cell CD8+ naive", "T cell CD8+", "T cell CD8+ central memory", "T cell CD8+ effector memory"),
+  "Tregs" = c("T cell regulatory (Tregs)"),
+  "Macrophages" = c("Macrophage", "Macrophage M1", "Macrophage M2"),
+  "B Cell" = c("Class-switched memory B cell", "B cell", "B cell plasma"),
+  "Immune Score" = c("immune score"),
+  "NK Cells" = c("T cell NK", "NK cell"),
+  "Neutrophil" = c("Neutrophil"),
+  "Stromal Score" = c("stroma score"))
+
+combined_data_long$grouped_cell_type <- factor(combined_data_long$cell_type,
+                                               levels = unlist(cell_type_groups),
+                                               labels = names(cell_type_groups))
+#label ID for each row ID 1=NT5Ehi and ID2 =NT5Elo
+combined_data_long <- combined_data_long %>%
+  mutate(ID = ifelse(row_number() <= 39, "1", "2"))
+#Filter the data for the subgroups within NT5Elo and NT5Ehi
+NT5Elo_subgroups <- combined_data_long %>%
+  filter(ID == "2" & grouped_cell_type %in% names(cell_type_groups))
+
+NT5Ehi_subgroups <- combined_data_long %>%
+  filter(ID == "1" & grouped_cell_type %in% names(cell_type_groups))
+View(combined_data_long)
+# Combine combined subgroups
+subgroup_data <- bind_rows(NT5Elo_subgroups, NT5Ehi_subgroups)
+
+# Remove the numeric suffix from grouped_cell_type
+subgroup_data$grouped_cell_type <- gsub("\\d+$", "", subgroup_data$grouped_cell_type)
+
+
+
+```
+---Plotting Immune deonconvolution in beeswarm() and getting comparisons for P.Value
+```{r}
+comparisons<-list(c("NT5Ehi_B Cell","NT5Elo_B Cell"),
+                  c("NT5Ehi_T Cell CD4+" ,"NT5Elo_T Cell CD4+"),
+                  c("NT5Ehi_T Cell CD8+","NT5Elo_T Cell CD8+"),
+                  c("NT5Ehi_Neutrophil" ,"NT5Elo_Neutrophil" ),
+                  c("NT5Ehi_NK Cells","NT5Elo_NK Cells"),
+                  c("NT5Ehi_Tregs" ,"NT5Elo_Tregs" ),
+                  c("NT5Ehi_Immune Score","NT5Elo_Immune Score"),
+                  c("NT5Ehi_Stromal Score","NT5Elo_Stromal Score"),
+                  c("NT5Ehi_Macrophages","NT5Elo_Macrophages")
+P1<-ggplot(subgroup_data_long, aes(x = grouped_cell_type, y = value,fill=ID,col=ID)) +
+geom_quasirandom(dodge.width = 100) +
+ scale_x_discrete("Cell Type")+
+  ylab("Proportion of Cells") +
+  ggtitle("Distribution of Gene Expression") +
+  facet_wrap(~ grouped_cell_type, scales = "free")+
+  theme(axis.text.x = element_blank()) +
+  theme_cowplot() + scale_fill_manual(values = c("NT5Elo" = "blue", "NT5Ehi" = "red")) +
+  scale_color_manual(values = c("NT5Elo" = "blue", "NT5Ehi" = "red"))
+print(P1)
+ # NB: stat_compare_means(data = data_all, comparisons = comparisons, method = "wilcox", paired = FALSE) could only be ran without Facet, so P.values were taken manualy and a table was constructed next to the figure containing all P.values of comparisons.
+ 
+save_plot('BeeswarmDeconvplot.tiff',P1,base_height=20, base_width = 10)
+
+```
+
